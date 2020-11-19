@@ -90,14 +90,11 @@ impl ESVO {
 
         let mut children = Vec::new();
         let mut extents = Vec::new();
-        let mut index = 0;
         for i in 0..layers.children.len() {
             let mut offset = layers.children[i].len();
-            for (j, node) in layers.children[i].iter_mut().enumerate() {
-                let before = node.child_offset;
+            for node in &mut layers.children[i] {
                 node.child_offset += offset as i16;
                 offset -= 1;
-                index += 1;
             }
             children.append(&mut layers.children[i]);
             extents.append(&mut layers.extents[i]);
@@ -140,12 +137,6 @@ impl ESVO {
         {
             *child_corner = Stride(parent_corner.0 >> 1);
         }
-
-        let extent_minimum = extent.minimum;
-        let corner_offsets: Vec<_> = Point3i::corner_offsets()
-            .into_iter()
-            .map(|p| p * edge_len)
-            .collect();
 
         let half_edge_len = edge_len >> 1;
         let mut leaf_bitmask = ChildMask(0);
