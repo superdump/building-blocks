@@ -53,6 +53,7 @@ building_blocks_vox = { path = "crates/building_blocks_vox", version = "0.2", op
 [dev-dependencies]
 bevy = "0.3" # for examples
 log = "0.4"
+noise = "0.6"
 
 [[bin]]
 name = "measure_compression_rate"
