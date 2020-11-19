@@ -92,28 +92,10 @@ impl ESVO {
         let mut extents = Vec::new();
         let mut index = 0;
         for i in 0..layers.children.len() {
-            // println!("children before: {:#?}", layers.children[i]);
             let mut offset = layers.children[i].len();
-            println!(
-                "{} current: {}, offset: {}, new: {}",
-                i,
-                children.len(),
-                offset,
-                children.len() + offset
-            );
             for (j, node) in layers.children[i].iter_mut().enumerate() {
                 let before = node.child_offset;
                 node.child_offset += offset as i16;
-                println!(
-                    "{}: idx {} {} -> {} {} {:?} {:?}",
-                    i,
-                    index,
-                    before,
-                    node.child_offset,
-                    index + node.child_offset,
-                    node,
-                    layers.extents[i][j]
-                );
                 offset -= 1;
                 index += 1;
             }
@@ -210,18 +192,14 @@ impl ESVO {
     }
 
     pub fn insert(&mut self, minimum: Point3i) {
-        println!("\n\ninsert: {:?}, before: {:?}", minimum, self);
         if self.extents.is_empty() {
             let (extent, child_descriptor) = initial_voxel(minimum);
             self.extents.push(extent);
             self.children.push(child_descriptor);
             self.extent = extent;
-            println!("insert: After (was empty): {:?}", self);
             return;
         }
-        let mut grew = false;
         while !self.extent.contains(&minimum) {
-            grew = true;
             // expand with 7 new octants in the direction of minimum
             let octant_dir = octant_direction(&self.extent.minimum, &minimum);
             let new_extent = grow_extent_in_dir(&self.extent, octant_dir);
@@ -249,9 +227,6 @@ impl ESVO {
                 self.extents.remove(self.root_index + 1);
             }
         }
-        if grew {
-            println!("insert: After growth: {:?}", self);
-        }
         // find the octant that contains the voxel at minimum
         let mut parent_indices = vec![self.root_index];
         let mut parent_extent = self.extent;
@@ -262,14 +237,9 @@ impl ESVO {
                 panic!("Should not happen!");
             }
             let (octant, octant_extent) = extent_to_octant(&parent_extent, &minimum);
-            println!(
-                "insert: Loop start: index {}, parent extent {:?}, parent indices {:?}, octant {}, octant_extent {:?}",
-                index, parent_extent, parent_indices, octant, octant_extent,
-            );
             if edge_length == 2 {
                 // base case: add the new voxel as a child and leaf
                 self.children[index].add_leaf(octant as usize);
-                println!("insert: After add_leaf: {:?}", self);
                 if self.children[index].is_full() {
                     self.collapse_child_octant(&mut parent_indices, index);
                 }
@@ -278,7 +248,6 @@ impl ESVO {
                 // create child octant and add it
                 self.create_child_octant(index, octant, octant_extent);
                 self.children[index].add_child(octant as usize);
-                println!("insert: After create_child_octant: {:?}", self);
             }
             // traverse into child octant
             parent_indices.push(index);
@@ -303,13 +272,8 @@ impl ESVO {
         if child_index >= self.children.len() {
             insert = false;
         }
-        println!(
-            "create_child_octant: index: {}, octant: {}, extent: {:?}, desc: {:?}, {}, child_offset: {}, child_index: {}",
-            index, octant, extent, self.children[index], if insert { "insert" } else { "append" }, child_offset, child_index,
-        );
         let child_descriptor = ChildDescriptor::new(None, None, None);
         if insert {
-            // println!("create_child_octant: INSERT {} {:?}", child_index, extent);
             self.extents.insert(child_index, extent);
             self.children.insert(child_index, child_descriptor);
             for i in 0..child_index {
@@ -318,15 +282,9 @@ impl ESVO {
                 }
             }
         } else {
-            // println!(
-            //     "create_child_octant: APPEND {} {:?}",
-            //     self.extents.len(),
-            //     extent
-            // );
             self.extents.push(extent);
             self.children.push(child_descriptor);
         }
-        // println!("create_child_octant: {:#?}", self.extents);
         self.children[index].child_offset = child_offset;
     }
 
@@ -335,14 +293,8 @@ impl ESVO {
             return;
         }
         let parent_index = parent_indices.pop().expect("Failed to pop parent index");
-        // TODO : Fix setting the correct octant as a leaf!!!
-        // let parent_child_offset = self.children[parent_index].child_offset;
         let (octant, _extent) =
             extent_to_octant(&self.extents[parent_index], &self.extents[index].minimum);
-        println!(
-            "collapse_child_octant: index: {}, parent_index: {}, octant: {}, parent: {:?}, current: {:?}",
-            index, parent_index, octant, self.extents[parent_index], self.extents[index],
-        );
         self.children[parent_index].add_leaf(octant as usize);
         // Remove full child
         self.children.remove(index);
@@ -353,7 +305,6 @@ impl ESVO {
                 self.children[i].child_offset -= 1;
             }
         }
-        println!("collapse_child_octant: After: {:?}", self);
         if parent_index > 0 && self.children[parent_index].is_full() {
             self.collapse_child_octant(parent_indices, parent_index);
         }
@@ -406,8 +357,7 @@ impl ESVO {
         // VISIT THIS NODE'S CHILDREN
 
         if index >= self.children.len() {
-            println!("WOULD HAVE PANICKED");
-            return VisitStatus::Continue;
+            panic!("Tried to visit a node with edge_len != 1 that was outside the known nodes");
         }
         let child_descriptor = &self.children[index];
 
@@ -632,10 +582,6 @@ impl ChildMask {
                 child_index += 1;
             }
         }
-        // println!(
-        //     "child_index: {}, octant index: {}, octant mask: {:#b}",
-        //     child_index, index, self.0
-        // );
         child_index
     }
 
@@ -695,14 +641,6 @@ mod tests {
             octree.extent,
             Extent3i::from_min_and_shape(points[0], PointN([4, 4, 4]))
         );
-        for (i, (desc, extent)) in octree
-            .children
-            .iter()
-            .zip(octree.extents.iter())
-            .enumerate()
-        {
-            println!("{}: {:?} {:?}", i, desc, extent);
-        }
         let child_descriptors = [
             ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(0b11111111)), Some(1)),
             ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
