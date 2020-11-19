@@ -267,7 +267,7 @@ impl LocationCode {
 
 /// A cube-shaped extent which is an octant at some level of an octree. As a leaf node, it
 /// represents a totally full set of points.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Octant {
     pub minimum: Point3i,
     pub edge_length: i32,

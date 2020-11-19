@@ -1,0 +1,793 @@
+use crate::{octree::VisitStatus, Octant, OctreeVisitor};
+use building_blocks_core::{
+    ComponentwiseIntegerOps, Extent3i, IntegerPoint, Neighborhoods, Point3i, PointN,
+};
+use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local, Stride};
+
+pub struct ESVO {
+    extent: Extent3i,
+    root_index: usize,
+    children: Vec<ChildDescriptor>,
+    extents: Vec<Extent3i>,
+}
+
+impl Default for ESVO {
+    fn default() -> Self {
+        ESVO::new()
+    }
+}
+
+struct Layers {
+    children: Vec<Vec<ChildDescriptor>>,
+    extents: Vec<Vec<Extent3i>>,
+}
+
+impl Layers {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            children: Vec::with_capacity(capacity),
+            extents: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+impl Default for Layers {
+    fn default() -> Self {
+        Self {
+            children: Vec::new(),
+            extents: Vec::new(),
+        }
+    }
+}
+
+impl ESVO {
+    pub fn new() -> Self {
+        Self {
+            extent: Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([0, 0, 0])),
+            root_index: 0,
+            children: Vec::new(),
+            extents: Vec::new(),
+        }
+    }
+
+    /// Constructs an `Octree` which contains all of the points in `extent` which are not empty (as
+    /// defined by the `IsEmpty` trait). `extent` must be cube-shaped with edge length being a power
+    /// of 2. For exponent E where edge length is 2^E, we must have `0 < E <= 6`, because there is a
+    /// maximum fixed depth of the octree.
+    pub fn from_array3<A, T>(array: &A, extent: Extent3i) -> Self
+    where
+        A: Array<[i32; 3]> + GetUncheckedRelease<Stride, T>,
+        T: Clone + IsEmpty,
+    {
+        assert!(extent.shape.dimensions_are_powers_of_2());
+        assert!(extent.shape.is_cube());
+
+        let power = extent.shape.x().trailing_zeros();
+        let edge_len = 1 << power;
+
+        // These are the corners of the root octant, in local coordinates.
+        let corner_offsets: Vec<_> = Point3i::corner_offsets()
+            .into_iter()
+            .map(|p| Local(p * edge_len))
+            .collect();
+        // Convert into strides for indexing efficiency.
+        let mut corner_strides = [Stride(0); 8];
+        array.strides_from_local_points(&corner_offsets, &mut corner_strides);
+
+        let mut layers = Layers::with_capacity(power as usize);
+        let min_local = Local(extent.minimum - array.extent().minimum);
+        let root_minimum = array.stride_from_local_point(&min_local);
+        let (root_exists, _full) = Self::partition_array(
+            extent,
+            root_minimum,
+            edge_len,
+            &corner_strides,
+            array,
+            0,
+            &mut layers,
+        );
+        assert!(root_exists);
+
+        let mut children = Vec::new();
+        let mut extents = Vec::new();
+        let mut index = 0;
+        for i in 0..layers.children.len() {
+            // println!("children before: {:#?}", layers.children[i]);
+            let mut offset = layers.children[i].len();
+            println!(
+                "{} current: {}, offset: {}, new: {}",
+                i,
+                children.len(),
+                offset,
+                children.len() + offset
+            );
+            for (j, node) in layers.children[i].iter_mut().enumerate() {
+                let before = node.child_offset;
+                node.child_offset += offset as i16;
+                println!(
+                    "{}: idx {} {} -> {} {} {:?} {:?}",
+                    i,
+                    index,
+                    before,
+                    node.child_offset,
+                    index + node.child_offset,
+                    node,
+                    layers.extents[i][j]
+                );
+                offset -= 1;
+                index += 1;
+            }
+            children.append(&mut layers.children[i]);
+            extents.append(&mut layers.extents[i]);
+        }
+        Self {
+            extent,
+            children,
+            extents,
+            ..Default::default()
+        }
+    }
+
+    fn partition_array<A, T>(
+        extent: Extent3i,
+        minimum: Stride,
+        edge_len: i32,
+        corner_strides: &[Stride],
+        array: &A,
+        layer: usize,
+        layers: &mut Layers,
+    ) -> (bool, bool)
+    where
+        A: Array<[i32; 3]> + GetUncheckedRelease<Stride, T>,
+        T: Clone + IsEmpty,
+    {
+        if layer == layers.children.len() {
+            layers.children.push(Vec::new());
+            layers.extents.push(Vec::new());
+        }
+
+        // Base case where the octant is a single voxel.
+        if edge_len == 1 {
+            let exists = !array.get_unchecked_release(minimum).is_empty();
+            return (exists, exists);
+        }
+
+        let mut octant_corner_strides = [Stride(0); 8];
+        for (child_corner, parent_corner) in
+            octant_corner_strides.iter_mut().zip(corner_strides.iter())
+        {
+            *child_corner = Stride(parent_corner.0 >> 1);
+        }
+
+        let extent_minimum = extent.minimum;
+        let corner_offsets: Vec<_> = Point3i::corner_offsets()
+            .into_iter()
+            .map(|p| p * edge_len)
+            .collect();
+
+        let half_edge_len = edge_len >> 1;
+        let mut leaf_bitmask = ChildMask(0);
+        let mut child_bitmask = ChildMask(0);
+        let child_layer_index = if layer + 1 >= layers.children.len() {
+            0
+        } else {
+            assert!(layers.children[layer + 1].len() < std::i16::MAX as usize);
+            layers.children[layer + 1].len() as i16
+        };
+        for (child_octant, offset) in octant_corner_strides.iter().enumerate() {
+            let octant_min = minimum + *offset;
+            let octant_extent = octant_to_extent(&extent, child_octant as u8);
+            let (has_child, is_leaf) = Self::partition_array(
+                octant_extent,
+                octant_min,
+                half_edge_len,
+                &octant_corner_strides,
+                array,
+                layer + 1,
+                layers,
+            );
+            if has_child {
+                child_bitmask.add_child(child_octant);
+            }
+            if is_leaf {
+                leaf_bitmask.add_child(child_octant);
+            }
+        }
+
+        let has_children = !child_bitmask.is_empty();
+        let is_leaf = leaf_bitmask.is_full();
+
+        if has_children && (!is_leaf || layer == 0) {
+            layers.children[layer].push(ChildDescriptor::new(
+                Some(leaf_bitmask),
+                Some(child_bitmask),
+                Some(child_layer_index as i16),
+            ));
+            layers.extents[layer].push(extent);
+        }
+
+        (has_children, is_leaf)
+    }
+
+    pub fn insert(&mut self, minimum: Point3i) {
+        println!("\n\ninsert: {:?}, before: {:?}", minimum, self);
+        if self.extents.is_empty() {
+            let (extent, child_descriptor) = initial_voxel(minimum);
+            self.extents.push(extent);
+            self.children.push(child_descriptor);
+            self.extent = extent;
+            println!("insert: After (was empty): {:?}", self);
+            return;
+        }
+        let mut grew = false;
+        while !self.extent.contains(&minimum) {
+            grew = true;
+            // expand with 7 new octants in the direction of minimum
+            let octant_dir = octant_direction(&self.extent.minimum, &minimum);
+            let new_extent = grow_extent_in_dir(&self.extent, octant_dir);
+            self.extent = new_extent;
+
+            // Add original as child of this
+            let old_octant = (!octant_dir) & 0x7;
+            self.extents.insert(self.root_index, self.extent);
+            self.children.insert(
+                self.root_index,
+                ChildDescriptor::new(
+                    if self.children.is_empty() {
+                        Some(ChildMask((1 << old_octant) as u8))
+                    } else {
+                        None
+                    },
+                    Some(ChildMask((1 << old_octant) as u8)),
+                    Some(1i16),
+                ),
+            );
+            if self.children[self.root_index + 1].is_full() {
+                self.children[self.root_index].add_leaf(old_octant as usize);
+                self.children[self.root_index].child_offset = 0;
+                self.children.remove(self.root_index + 1);
+                self.extents.remove(self.root_index + 1);
+            }
+        }
+        if grew {
+            println!("insert: After growth: {:?}", self);
+        }
+        // find the octant that contains the voxel at minimum
+        let mut parent_indices = vec![self.root_index];
+        let mut parent_extent = self.extent;
+        let mut index = self.root_index;
+        loop {
+            let edge_length = parent_extent.shape.x();
+            if edge_length == 1 {
+                panic!("Should not happen!");
+            }
+            let (octant, octant_extent) = extent_to_octant(&parent_extent, &minimum);
+            println!(
+                "insert: Loop start: index {}, parent extent {:?}, parent indices {:?}, octant {}, octant_extent {:?}",
+                index, parent_extent, parent_indices, octant, octant_extent,
+            );
+            if edge_length == 2 {
+                // base case: add the new voxel as a child and leaf
+                self.children[index].add_leaf(octant as usize);
+                println!("insert: After add_leaf: {:?}", self);
+                if self.children[index].is_full() {
+                    self.collapse_child_octant(&mut parent_indices, index);
+                }
+                return;
+            } else if !self.children[index].has_child(octant as usize) {
+                // create child octant and add it
+                self.create_child_octant(index, octant, octant_extent);
+                self.children[index].add_child(octant as usize);
+                println!("insert: After create_child_octant: {:?}", self);
+            }
+            // traverse into child octant
+            parent_indices.push(index);
+            parent_extent = octant_extent;
+            index = add_child_offset(index, self.children[index].child_offset)
+                + if octant_extent.shape.x() <= 2 {
+                    0
+                } else {
+                    self.children[index].child_index(octant as usize)
+                };
+        }
+    }
+
+    pub fn create_child_octant(&mut self, index: usize, octant: u8, extent: Extent3i) {
+        let (child_offset, mut insert) = if self.children[index].child_offset == 0 {
+            ((self.children.len() - index) as i16, false)
+        } else {
+            (self.children[index].child_offset, true)
+        };
+        let child_index = add_child_offset(index, child_offset)
+            + self.children[index].child_index(octant as usize);
+        if child_index >= self.children.len() {
+            insert = false;
+        }
+        println!(
+            "create_child_octant: index: {}, octant: {}, extent: {:?}, desc: {:?}, {}, child_offset: {}, child_index: {}",
+            index, octant, extent, self.children[index], if insert { "insert" } else { "append" }, child_offset, child_index,
+        );
+        let child_descriptor = ChildDescriptor::new(None, None, None);
+        if insert {
+            // println!("create_child_octant: INSERT {} {:?}", child_index, extent);
+            self.extents.insert(child_index, extent);
+            self.children.insert(child_index, child_descriptor);
+            for i in 0..child_index {
+                if add_child_offset(i, self.children[i].child_offset) >= child_index {
+                    self.children[i].child_offset += 1;
+                }
+            }
+        } else {
+            // println!(
+            //     "create_child_octant: APPEND {} {:?}",
+            //     self.extents.len(),
+            //     extent
+            // );
+            self.extents.push(extent);
+            self.children.push(child_descriptor);
+        }
+        // println!("create_child_octant: {:#?}", self.extents);
+        self.children[index].child_offset = child_offset;
+    }
+
+    pub fn collapse_child_octant(&mut self, parent_indices: &mut Vec<usize>, index: usize) {
+        if index == 0 {
+            return;
+        }
+        let parent_index = parent_indices.pop().expect("Failed to pop parent index");
+        // TODO : Fix setting the correct octant as a leaf!!!
+        // let parent_child_offset = self.children[parent_index].child_offset;
+        let (octant, _extent) =
+            extent_to_octant(&self.extents[parent_index], &self.extents[index].minimum);
+        println!(
+            "collapse_child_octant: index: {}, parent_index: {}, octant: {}, parent: {:?}, current: {:?}",
+            index, parent_index, octant, self.extents[parent_index], self.extents[index],
+        );
+        self.children[parent_index].add_leaf(octant as usize);
+        // Remove full child
+        self.children.remove(index);
+        self.extents.remove(index);
+        // Update indices
+        for i in 0..index {
+            if add_child_offset(i, self.children[i].child_offset) >= index {
+                self.children[i].child_offset -= 1;
+            }
+        }
+        println!("collapse_child_octant: After: {:?}", self);
+        if parent_index > 0 && self.children[parent_index].is_full() {
+            self.collapse_child_octant(parent_indices, parent_index);
+        }
+    }
+
+    /// Visit every non-empty octant of the octree.
+    pub fn visit(&self, visitor: &mut impl OctreeVisitor) -> VisitStatus {
+        if self.children.is_empty() {
+            return VisitStatus::Continue;
+        }
+
+        let minimum = self.extent.minimum;
+        let edge_len = self.extent.shape.x();
+        let corner_offsets: Vec<_> = Point3i::corner_offsets()
+            .into_iter()
+            .map(|p| p * edge_len)
+            .collect();
+
+        self._visit(self.root_index, minimum, edge_len, &corner_offsets, visitor)
+    }
+
+    fn _visit(
+        &self,
+        index: usize,
+        minimum: Point3i,
+        edge_length: i32,
+        corner_offsets: &[Point3i],
+        visitor: &mut impl OctreeVisitor,
+    ) -> VisitStatus {
+        let octant = Octant {
+            minimum,
+            edge_length,
+        };
+
+        // VISIT THIS NODE
+
+        // Base case where the octant is a single leaf voxel.
+        if edge_length == 1 {
+            return visitor.visit_octant(octant, true);
+        }
+
+        // Continue traversal of this branch.
+
+        // Definitely not at a leaf node.
+        let status = visitor.visit_octant(octant, false);
+        if status != VisitStatus::Continue {
+            return status;
+        }
+
+        // VISIT THIS NODE'S CHILDREN
+
+        if index >= self.children.len() {
+            println!("WOULD HAVE PANICKED");
+            return VisitStatus::Continue;
+        }
+        let child_descriptor = &self.children[index];
+
+        let mut octant_corner_offsets = [PointN([0; 3]); 8];
+        for (child_corner, parent_corner) in
+            octant_corner_offsets.iter_mut().zip(corner_offsets.iter())
+        {
+            *child_corner = parent_corner.scalar_right_shift(1);
+        }
+
+        let half_edge_length = edge_length >> 1;
+        let mut child_offset = child_descriptor.child_offset;
+        for (octant, offset) in octant_corner_offsets.iter().enumerate() {
+            let octant_min = minimum + *offset;
+            if child_descriptor.has_leaf(octant) {
+                let status = visitor.visit_octant(
+                    Octant {
+                        minimum: octant_min,
+                        edge_length: half_edge_length,
+                    },
+                    true,
+                );
+                if status != VisitStatus::Continue {
+                    return status;
+                }
+            } else if child_descriptor.has_child(octant) {
+                if self._visit(
+                    add_child_offset(index, child_offset),
+                    octant_min,
+                    half_edge_length,
+                    &octant_corner_offsets,
+                    visitor,
+                ) == VisitStatus::ExitEarly
+                {
+                    return VisitStatus::ExitEarly;
+                }
+                // child_offset is only incremented for child descriptors that exist
+                child_offset += 1;
+            }
+        }
+
+        // Continue with the rest of the tree.
+        VisitStatus::Continue
+    }
+}
+
+impl std::fmt::Debug for ESVO {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "")?;
+        for (i, (desc, extent)) in self.children.iter().zip(self.extents.iter()).enumerate() {
+            writeln!(f, "{}: {:?} {:?}", i, desc, extent)?;
+        }
+        Ok(())
+    }
+}
+
+fn initial_voxel(minimum: Point3i) -> (Extent3i, ChildDescriptor) {
+    let parent_extent = Extent3i::from_min_and_shape(minimum, PointN([2, 2, 2]));
+    let child_mask = ChildMask(1 << extent_to_octant(&parent_extent, &minimum).0);
+    (
+        parent_extent,
+        ChildDescriptor::new(Some(child_mask), Some(child_mask), None),
+    )
+}
+
+fn add_child_offset(index: usize, child_offset: i16) -> usize {
+    (index as isize + child_offset as isize) as usize
+}
+
+pub fn octant_direction(center: &Point3i, point: &Point3i) -> u8 {
+    let mut octant = 0;
+    if point.x() >= center.x() {
+        octant |= 1 << 0;
+    }
+    if point.y() >= center.y() {
+        octant |= 1 << 1;
+    }
+    if point.z() >= center.z() {
+        octant |= 1 << 2;
+    }
+    octant
+}
+
+/// Gets the octant and octant extent within the extent
+pub fn extent_to_octant(parent: &Extent3i, point: &Point3i) -> (u8, Extent3i) {
+    let center = extent_center(parent);
+    let octant = octant_direction(&center, point);
+    (octant, octant_to_extent(parent, octant))
+}
+
+pub fn extent_center(extent: &Extent3i) -> Point3i {
+    extent.minimum + extent.shape.scalar_right_shift(1)
+}
+
+pub fn octant_to_extent(parent: &Extent3i, octant: u8) -> Extent3i {
+    let shape = parent.shape.scalar_right_shift(1);
+    let minimum = match octant {
+        0 => parent.minimum,
+        1 => parent.minimum + PointN([1, 0, 0]) * shape.x(),
+        2 => parent.minimum + PointN([0, 1, 0]) * shape.x(),
+        3 => parent.minimum + PointN([1, 1, 0]) * shape.x(),
+        4 => parent.minimum + PointN([0, 0, 1]) * shape.x(),
+        5 => parent.minimum + PointN([1, 0, 1]) * shape.x(),
+        6 => parent.minimum + PointN([0, 1, 1]) * shape.x(),
+        7 => parent.minimum + PointN([1, 1, 1]) * shape.x(),
+        _ => panic!("Invalid octant"),
+    };
+    Extent3i::from_min_and_shape(minimum, shape)
+}
+
+pub fn grow_extent_in_dir(extent: &Extent3i, octant_direction: u8) -> Extent3i {
+    let mut new_extent = *extent;
+
+    if octant_direction & (1 << 0) == 0 {
+        *new_extent.minimum.x_mut() -= new_extent.shape.x();
+    }
+    if octant_direction & (1 << 1) == 0 {
+        *new_extent.minimum.y_mut() -= new_extent.shape.y();
+    }
+    if octant_direction & (1 << 2) == 0 {
+        *new_extent.minimum.z_mut() -= new_extent.shape.z();
+    }
+
+    new_extent.shape = new_extent.shape.scalar_left_shift(1);
+
+    new_extent
+}
+
+// [0..7] leaf_mask - octant bit mask indicating the child octant is a leaf
+// [8..15] valid_mask - octant bit mask indicating the child octant has some of its volume filled
+// [16..31] relative index of child descriptors
+#[derive(Debug, Default, PartialEq)]
+pub struct ChildDescriptor {
+    pub leaves: ChildMask,
+    pub children: ChildMask,
+    pub child_offset: i16,
+}
+
+impl ChildDescriptor {
+    pub fn new(
+        leaves: Option<ChildMask>,
+        children: Option<ChildMask>,
+        child_offset: Option<i16>,
+    ) -> Self {
+        let mut child_descriptor = Self::default();
+        if let Some(leaves) = leaves {
+            child_descriptor.leaves = leaves;
+        }
+        if let Some(children) = children {
+            child_descriptor.children = children;
+        }
+        if let Some(child_offset) = child_offset {
+            child_descriptor.child_offset = child_offset;
+        }
+        child_descriptor
+    }
+
+    pub fn add_leaf(&mut self, index: usize) {
+        self.children.add_child(index);
+        self.leaves.add_child(index);
+    }
+
+    pub fn remove_leaf(&mut self, index: usize) {
+        self.leaves.remove_child(index);
+    }
+
+    pub fn has_leaf(&self, index: usize) -> bool {
+        self.leaves.has_child(index)
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.children.is_full() && self.leaves.is_full()
+    }
+
+    pub fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    pub fn has_child(&self, index: usize) -> bool {
+        self.children.has_child(index)
+    }
+
+    pub fn child_index(&self, index: usize) -> usize {
+        let mut child_index = 0;
+        for i in 0..index {
+            if self.children.has_child(i) && !self.leaves.has_child(i) {
+                child_index += 1;
+            }
+        }
+        child_index
+    }
+
+    pub fn add_child(&mut self, index: usize) {
+        self.children.add_child(index);
+    }
+
+    pub fn remove_child(&mut self, index: usize) {
+        self.children.remove_child(index);
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct ChildMask(u8);
+
+impl ChildMask {
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.0 == 0xff
+    }
+
+    pub fn has_child(&self, index: usize) -> bool {
+        self.0 & (1 << index) != 0
+    }
+
+    pub fn child_index(&self, index: usize) -> usize {
+        let mut child_index = 0;
+        for i in 0..index {
+            if self.has_child(i) {
+                child_index += 1;
+            }
+        }
+        // println!(
+        //     "child_index: {}, octant index: {}, octant mask: {:#b}",
+        //     child_index, index, self.0
+        // );
+        child_index
+    }
+
+    pub fn add_child(&mut self, index: usize) {
+        self.0 |= 1 << index;
+    }
+
+    pub fn remove_child(&mut self, index: usize) {
+        self.0 &= !(1 << index);
+    }
+}
+
+impl std::fmt::Debug for ChildMask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#b}", self.0)
+    }
+}
+
+impl std::ops::BitAnd for ChildMask {
+    type Output = ChildMask;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        ChildMask(self.0 & rhs.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_one_voxel() {
+        let mut octree = ESVO::new();
+        let p = PointN([1, -2, 3]);
+        octree.insert(p);
+        assert_eq!(
+            octree.extent,
+            Extent3i::from_min_and_shape(p, PointN([2, 2, 2]))
+        );
+        assert_eq!(
+            octree.children[0],
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), None,),
+        );
+    }
+
+    #[test]
+    fn test_corners() {
+        let mut octree = ESVO::new();
+        let points: Vec<Point3i> = Point3i::corner_offsets()
+            .iter_mut()
+            .map(|p| p.scalar_left_shift(1))
+            .collect();
+        for p in &points {
+            octree.insert(*p);
+        }
+        assert_eq!(
+            octree.extent,
+            Extent3i::from_min_and_shape(points[0], PointN([4, 4, 4]))
+        );
+        for (i, (desc, extent)) in octree
+            .children
+            .iter()
+            .zip(octree.extents.iter())
+            .enumerate()
+        {
+            println!("{}: {:?} {:?}", i, desc, extent);
+        }
+        let child_descriptors = [
+            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(0b11111111)), Some(1)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+        ];
+        let extents = [
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([4, 4, 4])),
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([2, 0, 0]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([0, 2, 0]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([2, 2, 0]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([0, 0, 2]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([2, 0, 2]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([0, 2, 2]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([2, 2, 2]), PointN([2, 2, 2])),
+        ];
+        for (i, (desc, extent)) in octree
+            .children
+            .iter()
+            .zip(octree.extents.iter())
+            .enumerate()
+        {
+            assert_eq!(child_descriptors[i], *desc);
+            assert_eq!(extents[i], *extent);
+        }
+    }
+
+    #[test]
+    fn test_insert_moves_subtrees() {
+        let mut octree = ESVO::new();
+        let points = [PointN([0, 0, 0]), PointN([4, 4, 4])];
+        for p in &points {
+            octree.insert(*p);
+        }
+        assert_eq!(
+            octree.extent,
+            Extent3i::from_min_and_shape(points[0], PointN([8, 8, 8]))
+        );
+        let child_descriptors = [
+            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(0b10000001)), Some(1)),
+            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
+            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+        ];
+        let extents = [
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([8, 8, 8])),
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([4, 4, 4])),
+            Extent3i::from_min_and_shape(PointN([4, 4, 4]), PointN([4, 4, 4])),
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([2, 2, 2])),
+            Extent3i::from_min_and_shape(PointN([4, 4, 4]), PointN([2, 2, 2])),
+        ];
+        for (i, (desc, extent)) in octree
+            .children
+            .iter()
+            .zip(octree.extents.iter())
+            .enumerate()
+        {
+            assert_eq!(child_descriptors[i], *desc);
+            assert_eq!(extents[i], *extent);
+        }
+    }
+
+    #[test]
+    fn test_filled_collapse() {
+        let mut octree = ESVO::new();
+        for i in 0..4 * 4 * 4 {
+            let p = crate::morton::decode_3d(i as u32);
+            let p = PointN([p[0] as i32, p[1] as i32, p[2] as i32]);
+            octree.insert(p);
+        }
+        assert_eq!(
+            octree.extent,
+            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([4, 4, 4])),
+        );
+        assert_eq!(octree.children.len(), 1);
+        assert_eq!(
+            octree.children[0],
+            ChildDescriptor::new(Some(ChildMask(0xff)), Some(ChildMask(0xff)), None),
+        );
+    }
+}
