@@ -101,9 +101,7 @@ fn create_octree(mut esvo: ResMut<ESVOTree>) {
     //     for y in 0..n {
     //         for x in 0..n {
     //             // let y_max = heightmap[z][x];
-    //             // print!("  {},{},{}", x, y_max, z);
     //             if (x + y + z) < n {
-    //                 print!("  {},{},{}", x, y, z);
     //                 *array.get_mut(array.stride_from_local_point(
     //                     &building_blocks_storage::array::Local(PointN([
     //                         x as i32, y as i32, z as i32,
@@ -111,9 +109,7 @@ fn create_octree(mut esvo: ResMut<ESVOTree>) {
     //                 )) = Voxel(true);
     //             }
     //         }
-    //         println!("");
     //     }
-    //     println!("");
     // }
     let noise = RidgedMulti::new()
         .set_seed(1234)
@@ -195,12 +191,10 @@ fn update_meshes(
         esvo.octree.visit(&mut visitor);
         (visitor.new_entities, visitor.removed_entities)
     };
-    // println!("Generating new meshes for {:?}", new_entities);
     let offset = Vec3::new((esvo.array.extent().shape.x() + 10) as f32, 0.0, 0.0);
     for octant in &new_entities {
         let size = 0.5 * octant.edge_length as f32;
         let center = octant_center(&octant);
-        // println!("Creating Cube {} at {}", size, center);
         let mesh = meshes.add(Mesh::from(shape::Cube { size }));
         let entity = commands
             .spawn(PbrComponents {
@@ -218,7 +212,6 @@ fn update_meshes(
         esvo_meshes.entities.insert(*octant, entity);
     }
     for octant in &removed_entities {
-        println!("Removing {:?}", octant);
         let entity = esvo_meshes
             .entities
             .remove(octant)
@@ -244,13 +237,10 @@ pub struct ESVOMeshesVisitor<'a> {
 
 impl<'a> OctreeVisitor for ESVOMeshesVisitor<'a> {
     fn visit_octant(&mut self, octant: Octant, is_leaf: bool) -> VisitStatus {
-        println!("Visiting: {:?}, {}", octant, is_leaf);
         if is_leaf {
             if self.entities.contains_key(&octant) {
-                println!("Keeping {:?}", octant);
                 self.removed_entities.remove(&octant);
             } else {
-                println!("Adding {:?}", octant);
                 self.new_entities.insert(octant);
             }
         }
