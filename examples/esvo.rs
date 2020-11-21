@@ -113,7 +113,7 @@ fn create_octree(mut esvo: ResMut<ESVOTree>) {
     // }
     let noise = RidgedMulti::new()
         .set_seed(1234)
-        .set_frequency(0.08)
+        .set_frequency(0.008)
         .set_octaves(5);
     let yoffset = n as f64 * 0.5;
     let yscale = 0.8 * yoffset;

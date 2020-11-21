@@ -93,7 +93,7 @@ impl ESVO {
         for i in 0..layers.children.len() {
             let mut offset = layers.children[i].len();
             for node in &mut layers.children[i] {
-                node.child_offset += offset as i16;
+                node.set_child_offset(node.child_offset() + offset as i16);
                 offset -= 1;
             }
             children.append(&mut layers.children[i]);
@@ -213,7 +213,7 @@ impl ESVO {
             );
             if self.children[self.root_index + 1].is_full() {
                 self.children[self.root_index].add_leaf(old_octant as usize);
-                self.children[self.root_index].child_offset = 0;
+                self.children[self.root_index].set_child_offset(0);
                 self.children.remove(self.root_index + 1);
                 self.extents.remove(self.root_index + 1);
             }
@@ -243,7 +243,7 @@ impl ESVO {
             // traverse into child octant
             parent_indices.push(index);
             parent_extent = octant_extent;
-            index = add_child_offset(index, self.children[index].child_offset)
+            index = add_child_offset(index, self.children[index].child_offset())
                 + if octant_extent.shape.x() <= 2 {
                     0
                 } else {
@@ -253,10 +253,10 @@ impl ESVO {
     }
 
     pub fn create_child_octant(&mut self, index: usize, octant: u8, extent: Extent3i) {
-        let (child_offset, mut insert) = if self.children[index].child_offset == 0 {
+        let (child_offset, mut insert) = if self.children[index].child_offset() == 0 {
             ((self.children.len() - index) as i16, false)
         } else {
-            (self.children[index].child_offset, true)
+            (self.children[index].child_offset(), true)
         };
         let child_index = add_child_offset(index, child_offset)
             + self.children[index].child_index(octant as usize);
@@ -268,15 +268,16 @@ impl ESVO {
             self.extents.insert(child_index, extent);
             self.children.insert(child_index, child_descriptor);
             for i in 0..child_index {
-                if add_child_offset(i, self.children[i].child_offset) >= child_index {
-                    self.children[i].child_offset += 1;
+                let child_offset_i = self.children[i].child_offset();
+                if add_child_offset(i, child_offset_i) >= child_index {
+                    self.children[i].set_child_offset(child_offset_i + 1);
                 }
             }
         } else {
             self.extents.push(extent);
             self.children.push(child_descriptor);
         }
-        self.children[index].child_offset = child_offset;
+        self.children[index].set_child_offset(child_offset);
     }
 
     pub fn collapse_child_octant(&mut self, parent_indices: &mut Vec<usize>, index: usize) {
@@ -292,8 +293,9 @@ impl ESVO {
         self.extents.remove(index);
         // Update indices
         for i in 0..index {
-            if add_child_offset(i, self.children[i].child_offset) >= index {
-                self.children[i].child_offset -= 1;
+            let child_offset = self.children[i].child_offset();
+            if add_child_offset(i, child_offset) >= index {
+                self.children[i].set_child_offset(child_offset - 1);
             }
         }
         if parent_index > 0 && self.children[parent_index].is_full() {
@@ -360,7 +362,7 @@ impl ESVO {
         }
 
         let half_edge_length = edge_length >> 1;
-        let mut child_offset = child_descriptor.child_offset;
+        let mut child_offset = child_descriptor.child_offset();
         for (octant, offset) in octant_corner_offsets.iter().enumerate() {
             let octant_min = minimum + *offset;
             if child_descriptor.has_leaf(octant) {
@@ -477,15 +479,21 @@ pub fn grow_extent_in_dir(extent: &Extent3i, octant_direction: u8) -> Extent3i {
     new_extent
 }
 
+const LEAF_MASK_BITS: u32 = 8;
+const CHILD_MASK_BITS: u32 = 8;
+// const CHILD_OFFSET_BITS: u32 = 16;
+
+const CHILDREN_SHIFT_BITS: u32 = LEAF_MASK_BITS;
+const CHILD_OFFSET_SHIFT_BITS: u32 = LEAF_MASK_BITS + CHILD_MASK_BITS;
+
+const BIT_MASK_8: u32 = 0xff;
+const BIT_MASK_16: u32 = 0xffff;
+
 // [0..7] leaf_mask - octant bit mask indicating the child octant is a leaf
 // [8..15] valid_mask - octant bit mask indicating the child octant has some of its volume filled
 // [16..31] relative index of child descriptors
-#[derive(Debug, Default, PartialEq)]
-pub struct ChildDescriptor {
-    pub leaves: ChildMask,
-    pub children: ChildMask,
-    pub child_offset: i16,
-}
+#[derive(Default, PartialEq)]
+pub struct ChildDescriptor(u32);
 
 impl ChildDescriptor {
     pub fn new(
@@ -495,46 +503,83 @@ impl ChildDescriptor {
     ) -> Self {
         let mut child_descriptor = Self::default();
         if let Some(leaves) = leaves {
-            child_descriptor.leaves = leaves;
+            child_descriptor.set_leaves(leaves);
         }
         if let Some(children) = children {
-            child_descriptor.children = children;
+            child_descriptor.set_children(children);
         }
         if let Some(child_offset) = child_offset {
-            child_descriptor.child_offset = child_offset;
+            child_descriptor.set_child_offset(child_offset);
         }
         child_descriptor
     }
 
+    pub fn leaves(&self) -> ChildMask {
+        ChildMask((self.0 & BIT_MASK_8) as u8)
+    }
+
+    pub fn set_leaves(&mut self, leaves: ChildMask) {
+        // !BIT_MASK_8 makes 0x000000ff into 0xffffff00
+        // and-ing the current value with this zeros out the bits at BIT_MASK_8
+        // or-ing this with the value sets the relevant bits
+        self.0 = (self.0 & !BIT_MASK_8) | leaves.0 as u32;
+    }
+
+    pub fn children(&self) -> ChildMask {
+        ChildMask(((self.0 >> CHILDREN_SHIFT_BITS) & BIT_MASK_8) as u8)
+    }
+
+    pub fn set_children(&mut self, children: ChildMask) {
+        // !(BIT_MASK_8 << CHILDREN_SHIFT_BITS) makes 0x0000ff00 into 0xffff00ff
+        // and-ing the current value with this zeros out the bits at BIT_MASK_8 << CHILDREN_SHIFT_BITS
+        // or-ing this with the (value << CHILDREN_SHIFT_BITS) sets the relevant bits
+        self.0 = (self.0 & !(BIT_MASK_8 << CHILDREN_SHIFT_BITS))
+            | (children.0 as u32).overflowing_shl(CHILDREN_SHIFT_BITS).0;
+    }
+
+    pub fn child_offset(&self) -> i16 {
+        ((self.0 >> CHILD_OFFSET_SHIFT_BITS) & BIT_MASK_16) as i16
+    }
+
+    pub fn set_child_offset(&mut self, child_offset: i16) {
+        // !(BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS) makes 0xffff0000 into 0x0000ffff
+        // and-ing the current value with this zeros out the bits at BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS
+        // or-ing this with the (value << CHILD_OFFSET_SHIFT_BITS) sets the relevant bits
+        self.0 = (self.0 & !(BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS))
+            | (child_offset as u32)
+                .overflowing_shl(CHILD_OFFSET_SHIFT_BITS)
+                .0;
+    }
+
     pub fn add_leaf(&mut self, index: usize) {
-        self.children.add_child(index);
-        self.leaves.add_child(index);
+        self.0 |= 1 << index;
+        self.add_child(index);
     }
 
     pub fn remove_leaf(&mut self, index: usize) {
-        self.leaves.remove_child(index);
+        self.0 &= !(1 << index);
     }
 
     pub fn has_leaf(&self, index: usize) -> bool {
-        self.leaves.has_child(index)
+        self.0 & (1 << index) != 0
     }
 
     pub fn is_full(&self) -> bool {
-        self.children.is_full() && self.leaves.is_full()
+        self.0 & BIT_MASK_16 == BIT_MASK_16
     }
 
     pub fn has_children(&self) -> bool {
-        !self.children.is_empty()
+        self.0 & (BIT_MASK_8 << CHILDREN_SHIFT_BITS) != 0
     }
 
     pub fn has_child(&self, index: usize) -> bool {
-        self.children.has_child(index)
+        self.0 & (1 << (CHILDREN_SHIFT_BITS as usize + index)) != 0
     }
 
     pub fn child_index(&self, index: usize) -> usize {
         let mut child_index = 0;
         for i in 0..index {
-            if self.children.has_child(i) && !self.leaves.has_child(i) {
+            if self.has_child(i) && !self.has_leaf(i) {
                 child_index += 1;
             }
         }
@@ -542,11 +587,21 @@ impl ChildDescriptor {
     }
 
     pub fn add_child(&mut self, index: usize) {
-        self.children.add_child(index);
+        self.0 |= 1 << (CHILDREN_SHIFT_BITS as usize + index);
     }
 
     pub fn remove_child(&mut self, index: usize) {
-        self.children.remove_child(index);
+        self.0 &= !(1 << (CHILDREN_SHIFT_BITS as usize + index));
+    }
+}
+
+impl std::fmt::Debug for ChildDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildDescriptor")
+            .field("child_offset", &self.child_offset())
+            .field("children", &self.children())
+            .field("leaves", &self.leaves())
+            .finish()
     }
 }
 
@@ -559,7 +614,7 @@ impl ChildMask {
     }
 
     pub fn is_full(&self) -> bool {
-        self.0 == 0xff
+        self.0 & BIT_MASK_8 as u8 == BIT_MASK_8 as u8
     }
 
     pub fn has_child(&self, index: usize) -> bool {
