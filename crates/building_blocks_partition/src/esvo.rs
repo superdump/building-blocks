@@ -6,7 +6,6 @@ use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local
 
 pub struct ESVO {
     extent: Extent3i,
-    root_index: usize,
     children: Vec<ChildDescriptor>,
     extents: Vec<Extent3i>,
 }
@@ -44,7 +43,6 @@ impl ESVO {
     pub fn new() -> Self {
         Self {
             extent: Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([0, 0, 0])),
-            root_index: 0,
             children: Vec::new(),
             extents: Vec::new(),
         }
@@ -198,9 +196,9 @@ impl ESVO {
 
             // Add original as child of this
             let old_octant = (!octant_dir) & 0x7;
-            self.extents.insert(self.root_index, self.extent);
+            self.extents.insert(0, self.extent);
             self.children.insert(
-                self.root_index,
+                0,
                 ChildDescriptor::new(
                     if self.children.is_empty() {
                         Some(ChildMask((1 << old_octant) as u8))
@@ -211,17 +209,17 @@ impl ESVO {
                     Some(1i16),
                 ),
             );
-            if self.children[self.root_index + 1].is_full() {
-                self.children[self.root_index].add_leaf(old_octant as usize);
-                self.children[self.root_index].set_child_offset(0);
-                self.children.remove(self.root_index + 1);
-                self.extents.remove(self.root_index + 1);
+            if self.children[1].is_full() {
+                self.children[0].add_leaf(old_octant as usize);
+                self.children[0].set_child_offset(0);
+                self.children.remove(1);
+                self.extents.remove(1);
             }
         }
         // find the octant that contains the voxel at minimum
-        let mut parent_indices = vec![self.root_index];
+        let mut parent_indices = vec![0];
         let mut parent_extent = self.extent;
-        let mut index = self.root_index;
+        let mut index = 0;
         loop {
             let edge_length = parent_extent.shape.x();
             if edge_length == 1 {
@@ -316,7 +314,7 @@ impl ESVO {
             .map(|p| p * edge_len)
             .collect();
 
-        self._visit(self.root_index, minimum, edge_len, &corner_offsets, visitor)
+        self._visit(0, minimum, edge_len, &corner_offsets, visitor)
     }
 
     fn _visit(
