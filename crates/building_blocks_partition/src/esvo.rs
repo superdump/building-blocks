@@ -6,7 +6,7 @@ use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local
 
 pub struct ESVO {
     extent: Extent3i,
-    children: Vec<ChildDescriptor>,
+    children: Vec<u32>,
 }
 
 impl Default for ESVO {
@@ -16,7 +16,7 @@ impl Default for ESVO {
 }
 
 struct Layers {
-    children: Vec<Vec<ChildDescriptor>>,
+    children: Vec<Vec<u32>>,
 }
 
 impl Layers {
@@ -160,7 +160,7 @@ impl ESVO {
         let is_leaf = leaf_bitmask.is_full();
 
         if has_children && (!is_leaf || layer == 0) {
-            layers.children[layer].push(ChildDescriptor::new(
+            layers.children[layer].push(child_descriptor(
                 Some(leaf_bitmask),
                 Some(child_bitmask),
                 Some(child_layer_index as i16),
@@ -187,7 +187,7 @@ impl ESVO {
             let old_octant = (!octant_dir) & 0x7;
             self.children.insert(
                 0,
-                ChildDescriptor::new(
+                child_descriptor(
                     if self.children.is_empty() {
                         Some(ChildMask((1 << old_octant) as u8))
                     } else {
@@ -248,7 +248,7 @@ impl ESVO {
         if child_index >= self.children.len() {
             insert = false;
         }
-        let child_descriptor = ChildDescriptor::new(None, None, None);
+        let child_descriptor = child_descriptor(None, None, None);
         if insert {
             self.children.insert(child_index, child_descriptor);
             for i in 0..child_index {
@@ -393,12 +393,12 @@ impl std::fmt::Debug for ESVO {
     }
 }
 
-fn initial_voxel(minimum: Point3i) -> (Extent3i, ChildDescriptor) {
+fn initial_voxel(minimum: Point3i) -> (Extent3i, u32) {
     let parent_extent = Extent3i::from_min_and_shape(minimum, PointN([2, 2, 2]));
     let child_mask = ChildMask(1 << extent_to_octant(&parent_extent, &minimum).0);
     (
         parent_extent,
-        ChildDescriptor::new(Some(child_mask), Some(child_mask), None),
+        child_descriptor(Some(child_mask), Some(child_mask), None),
     )
 }
 
@@ -478,91 +478,107 @@ const BIT_MASK_16: u32 = 0xffff;
 // [0..7] leaf_mask - octant bit mask indicating the child octant is a leaf
 // [8..15] valid_mask - octant bit mask indicating the child octant has some of its volume filled
 // [16..31] relative index of child descriptors
-#[derive(Default, PartialEq)]
-pub struct ChildDescriptor(u32);
+pub trait ChildDescriptor {
+    fn leaves(&self) -> ChildMask;
+    fn set_leaves(&mut self, leaves: ChildMask);
+    fn children(&self) -> ChildMask;
+    fn set_children(&mut self, children: ChildMask);
+    fn child_offset(&self) -> i16;
+    fn set_child_offset(&mut self, child_offset: i16);
+    fn add_leaf(&mut self, index: usize);
+    fn remove_leaf(&mut self, index: usize);
+    fn has_leaf(&self, index: usize) -> bool;
+    fn is_full(&self) -> bool;
+    fn has_children(&self) -> bool;
+    fn has_child(&self, index: usize) -> bool;
+    fn child_index(&self, index: usize) -> usize;
+    fn add_child(&mut self, index: usize);
+    fn remove_child(&mut self, index: usize);
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+}
 
-impl ChildDescriptor {
-    pub fn new(
-        leaves: Option<ChildMask>,
-        children: Option<ChildMask>,
-        child_offset: Option<i16>,
-    ) -> Self {
-        let mut child_descriptor = Self::default();
-        if let Some(leaves) = leaves {
-            child_descriptor.set_leaves(leaves);
-        }
-        if let Some(children) = children {
-            child_descriptor.set_children(children);
-        }
-        if let Some(child_offset) = child_offset {
-            child_descriptor.set_child_offset(child_offset);
-        }
-        child_descriptor
+fn child_descriptor(
+    leaves: Option<ChildMask>,
+    children: Option<ChildMask>,
+    child_offset: Option<i16>,
+) -> u32 {
+    let mut child_descriptor = u32::default();
+    if let Some(leaves) = leaves {
+        child_descriptor.set_leaves(leaves);
+    }
+    if let Some(children) = children {
+        child_descriptor.set_children(children);
+    }
+    if let Some(child_offset) = child_offset {
+        child_descriptor.set_child_offset(child_offset);
+    }
+    child_descriptor
+}
+
+impl ChildDescriptor for u32 {
+    fn leaves(&self) -> ChildMask {
+        ChildMask((self & BIT_MASK_8) as u8)
     }
 
-    pub fn leaves(&self) -> ChildMask {
-        ChildMask((self.0 & BIT_MASK_8) as u8)
-    }
-
-    pub fn set_leaves(&mut self, leaves: ChildMask) {
+    fn set_leaves(&mut self, leaves: ChildMask) {
         // !BIT_MASK_8 makes 0x000000ff into 0xffffff00
         // and-ing the current value with this zeros out the bits at BIT_MASK_8
         // or-ing this with the value sets the relevant bits
-        self.0 = (self.0 & !BIT_MASK_8) | leaves.0 as u32;
+        *self = (*self & !BIT_MASK_8) | leaves.0 as u32;
     }
 
-    pub fn children(&self) -> ChildMask {
-        ChildMask(((self.0 >> CHILDREN_SHIFT_BITS) & BIT_MASK_8) as u8)
+    fn children(&self) -> ChildMask {
+        ChildMask(((self >> CHILDREN_SHIFT_BITS) & BIT_MASK_8) as u8)
     }
 
-    pub fn set_children(&mut self, children: ChildMask) {
+    fn set_children(&mut self, children: ChildMask) {
         // !(BIT_MASK_8 << CHILDREN_SHIFT_BITS) makes 0x0000ff00 into 0xffff00ff
         // and-ing the current value with this zeros out the bits at BIT_MASK_8 << CHILDREN_SHIFT_BITS
         // or-ing this with the (value << CHILDREN_SHIFT_BITS) sets the relevant bits
-        self.0 = (self.0 & !(BIT_MASK_8 << CHILDREN_SHIFT_BITS))
+        *self = (*self & !(BIT_MASK_8 << CHILDREN_SHIFT_BITS))
             | (children.0 as u32).overflowing_shl(CHILDREN_SHIFT_BITS).0;
     }
 
-    pub fn child_offset(&self) -> i16 {
-        ((self.0 >> CHILD_OFFSET_SHIFT_BITS) & BIT_MASK_16) as i16
+    fn child_offset(&self) -> i16 {
+        ((self >> CHILD_OFFSET_SHIFT_BITS) & BIT_MASK_16) as i16
     }
 
-    pub fn set_child_offset(&mut self, child_offset: i16) {
+    fn set_child_offset(&mut self, child_offset: i16) {
         // !(BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS) makes 0xffff0000 into 0x0000ffff
         // and-ing the current value with this zeros out the bits at BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS
         // or-ing this with the (value << CHILD_OFFSET_SHIFT_BITS) sets the relevant bits
-        self.0 = (self.0 & !(BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS))
+        *self = (*self & !(BIT_MASK_16 << CHILD_OFFSET_SHIFT_BITS))
             | (child_offset as u32)
                 .overflowing_shl(CHILD_OFFSET_SHIFT_BITS)
                 .0;
     }
 
-    pub fn add_leaf(&mut self, index: usize) {
-        self.0 |= 1 << index;
+    fn add_leaf(&mut self, index: usize) {
+        *self |= 1 << index;
         self.add_child(index);
     }
 
-    pub fn remove_leaf(&mut self, index: usize) {
-        self.0 &= !(1 << index);
+    fn remove_leaf(&mut self, index: usize) {
+        *self &= !(1 << index);
     }
 
-    pub fn has_leaf(&self, index: usize) -> bool {
-        self.0 & (1 << index) != 0
+    fn has_leaf(&self, index: usize) -> bool {
+        self & (1 << index) != 0
     }
 
-    pub fn is_full(&self) -> bool {
-        self.0 & BIT_MASK_16 == BIT_MASK_16
+    fn is_full(&self) -> bool {
+        self & BIT_MASK_16 == BIT_MASK_16
     }
 
-    pub fn has_children(&self) -> bool {
-        self.0 & (BIT_MASK_8 << CHILDREN_SHIFT_BITS) != 0
+    fn has_children(&self) -> bool {
+        self & (BIT_MASK_8 << CHILDREN_SHIFT_BITS) != 0
     }
 
-    pub fn has_child(&self, index: usize) -> bool {
-        self.0 & (1 << (CHILDREN_SHIFT_BITS as usize + index)) != 0
+    fn has_child(&self, index: usize) -> bool {
+        self & (1 << (CHILDREN_SHIFT_BITS as usize + index)) != 0
     }
 
-    pub fn child_index(&self, index: usize) -> usize {
+    fn child_index(&self, index: usize) -> usize {
         let mut child_index = 0;
         for i in 0..index {
             if self.has_child(i) && !self.has_leaf(i) {
@@ -572,16 +588,14 @@ impl ChildDescriptor {
         child_index
     }
 
-    pub fn add_child(&mut self, index: usize) {
-        self.0 |= 1 << (CHILDREN_SHIFT_BITS as usize + index);
+    fn add_child(&mut self, index: usize) {
+        *self |= 1 << (CHILDREN_SHIFT_BITS as usize + index);
     }
 
-    pub fn remove_child(&mut self, index: usize) {
-        self.0 &= !(1 << (CHILDREN_SHIFT_BITS as usize + index));
+    fn remove_child(&mut self, index: usize) {
+        *self &= !(1 << (CHILDREN_SHIFT_BITS as usize + index));
     }
-}
 
-impl std::fmt::Debug for ChildDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChildDescriptor")
             .field("child_offset", &self.child_offset())
@@ -655,7 +669,7 @@ mod tests {
         );
         assert_eq!(
             octree.children[0],
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), None,),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), None,),
         );
     }
 
@@ -674,15 +688,15 @@ mod tests {
             Extent3i::from_min_and_shape(points[0], PointN([4, 4, 4]))
         );
         let child_descriptors = [
-            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(0b11111111)), Some(1)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(0)), Some(ChildMask(0b11111111)), Some(1)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
         ];
         for (i, desc) in octree.children.iter().enumerate() {
             assert_eq!(child_descriptors[i], *desc);
@@ -701,11 +715,11 @@ mod tests {
             Extent3i::from_min_and_shape(points[0], PointN([8, 8, 8]))
         );
         let child_descriptors = [
-            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(0b10000001)), Some(1)),
-            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
-            ChildDescriptor::new(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
-            ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(0)), Some(ChildMask(0b10000001)), Some(1)),
+            child_descriptor(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
+            child_descriptor(Some(ChildMask(0)), Some(ChildMask(1)), Some(2)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
+            child_descriptor(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
         ];
         for (i, desc) in octree.children.iter().enumerate() {
             assert_eq!(child_descriptors[i], *desc);
@@ -727,7 +741,7 @@ mod tests {
         assert_eq!(octree.children.len(), 1);
         assert_eq!(
             octree.children[0],
-            ChildDescriptor::new(Some(ChildMask(0xff)), Some(ChildMask(0xff)), None),
+            child_descriptor(Some(ChildMask(0xff)), Some(ChildMask(0xff)), None),
         );
     }
 }
