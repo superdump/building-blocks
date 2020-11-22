@@ -7,7 +7,6 @@ use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local
 pub struct ESVO {
     extent: Extent3i,
     children: Vec<ChildDescriptor>,
-    extents: Vec<Extent3i>,
 }
 
 impl Default for ESVO {
@@ -18,14 +17,12 @@ impl Default for ESVO {
 
 struct Layers {
     children: Vec<Vec<ChildDescriptor>>,
-    extents: Vec<Vec<Extent3i>>,
 }
 
 impl Layers {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             children: Vec::with_capacity(capacity),
-            extents: Vec::with_capacity(capacity),
         }
     }
 }
@@ -34,7 +31,6 @@ impl Default for Layers {
     fn default() -> Self {
         Self {
             children: Vec::new(),
-            extents: Vec::new(),
         }
     }
 }
@@ -44,7 +40,6 @@ impl ESVO {
         Self {
             extent: Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([0, 0, 0])),
             children: Vec::new(),
-            extents: Vec::new(),
         }
     }
 
@@ -87,7 +82,6 @@ impl ESVO {
         assert!(root_exists);
 
         let mut children = Vec::new();
-        let mut extents = Vec::new();
         for i in 0..layers.children.len() {
             let mut offset = layers.children[i].len();
             for node in &mut layers.children[i] {
@@ -95,12 +89,10 @@ impl ESVO {
                 offset -= 1;
             }
             children.append(&mut layers.children[i]);
-            extents.append(&mut layers.extents[i]);
         }
         Self {
             extent,
             children,
-            extents,
             ..Default::default()
         }
     }
@@ -120,7 +112,6 @@ impl ESVO {
     {
         if layer == layers.children.len() {
             layers.children.push(Vec::new());
-            layers.extents.push(Vec::new());
         }
 
         // Base case where the octant is a single voxel.
@@ -174,16 +165,14 @@ impl ESVO {
                 Some(child_bitmask),
                 Some(child_layer_index as i16),
             ));
-            layers.extents[layer].push(extent);
         }
 
         (has_children, is_leaf)
     }
 
     pub fn insert(&mut self, minimum: Point3i) {
-        if self.extents.is_empty() {
+        if self.children.is_empty() {
             let (extent, child_descriptor) = initial_voxel(minimum);
-            self.extents.push(extent);
             self.children.push(child_descriptor);
             self.extent = extent;
             return;
@@ -196,7 +185,6 @@ impl ESVO {
 
             // Add original as child of this
             let old_octant = (!octant_dir) & 0x7;
-            self.extents.insert(0, self.extent);
             self.children.insert(
                 0,
                 ChildDescriptor::new(
@@ -213,11 +201,10 @@ impl ESVO {
                 self.children[0].add_leaf(old_octant as usize);
                 self.children[0].set_child_offset(0);
                 self.children.remove(1);
-                self.extents.remove(1);
             }
         }
         // find the octant that contains the voxel at minimum
-        let mut parent_indices = vec![0];
+        let mut parents = vec![(0, self.extent)];
         let mut parent_extent = self.extent;
         let mut index = 0;
         loop {
@@ -230,16 +217,16 @@ impl ESVO {
                 // base case: add the new voxel as a child and leaf
                 self.children[index].add_leaf(octant as usize);
                 if self.children[index].is_full() {
-                    self.collapse_child_octant(&mut parent_indices, index);
+                    self.collapse_child_octant(&mut parents, index, octant_extent);
                 }
                 return;
             } else if !self.children[index].has_child(octant as usize) {
                 // create child octant and add it
-                self.create_child_octant(index, octant, octant_extent);
+                self.create_child_octant(index, octant);
                 self.children[index].add_child(octant as usize);
             }
             // traverse into child octant
-            parent_indices.push(index);
+            parents.push((index, octant_extent));
             parent_extent = octant_extent;
             index = add_child_offset(index, self.children[index].child_offset())
                 + if octant_extent.shape.x() <= 2 {
@@ -250,7 +237,7 @@ impl ESVO {
         }
     }
 
-    pub fn create_child_octant(&mut self, index: usize, octant: u8, extent: Extent3i) {
+    pub fn create_child_octant(&mut self, index: usize, octant: u8) {
         let (child_offset, mut insert) = if self.children[index].child_offset() == 0 {
             ((self.children.len() - index) as i16, false)
         } else {
@@ -263,7 +250,6 @@ impl ESVO {
         }
         let child_descriptor = ChildDescriptor::new(None, None, None);
         if insert {
-            self.extents.insert(child_index, extent);
             self.children.insert(child_index, child_descriptor);
             for i in 0..child_index {
                 let child_offset_i = self.children[i].child_offset();
@@ -272,23 +258,25 @@ impl ESVO {
                 }
             }
         } else {
-            self.extents.push(extent);
             self.children.push(child_descriptor);
         }
         self.children[index].set_child_offset(child_offset);
     }
 
-    pub fn collapse_child_octant(&mut self, parent_indices: &mut Vec<usize>, index: usize) {
+    pub fn collapse_child_octant(
+        &mut self,
+        parents: &mut Vec<(usize, Extent3i)>,
+        index: usize,
+        extent: Extent3i,
+    ) {
         if index == 0 {
             return;
         }
-        let parent_index = parent_indices.pop().expect("Failed to pop parent index");
-        let (octant, _extent) =
-            extent_to_octant(&self.extents[parent_index], &self.extents[index].minimum);
+        let (parent_index, parent_extent) = parents.pop().expect("Failed to pop parent");
+        let (octant, _extent) = extent_to_octant(&parent_extent, &extent.minimum);
         self.children[parent_index].add_leaf(octant as usize);
         // Remove full child
         self.children.remove(index);
-        self.extents.remove(index);
         // Update indices
         for i in 0..index {
             let child_offset = self.children[i].child_offset();
@@ -297,7 +285,7 @@ impl ESVO {
             }
         }
         if parent_index > 0 && self.children[parent_index].is_full() {
-            self.collapse_child_octant(parent_indices, parent_index);
+            self.collapse_child_octant(parents, parent_index, parent_extent);
         }
     }
 
@@ -398,8 +386,8 @@ impl ESVO {
 impl std::fmt::Debug for ESVO {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "")?;
-        for (i, (desc, extent)) in self.children.iter().zip(self.extents.iter()).enumerate() {
-            writeln!(f, "{}: {:?} {:?}", i, desc, extent)?;
+        for (i, desc) in self.children.iter().enumerate() {
+            writeln!(f, "{}: {:?}", i, desc)?;
         }
         Ok(())
     }
@@ -696,25 +684,8 @@ mod tests {
             ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
             ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
         ];
-        let extents = [
-            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([4, 4, 4])),
-            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([2, 0, 0]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([0, 2, 0]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([2, 2, 0]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([0, 0, 2]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([2, 0, 2]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([0, 2, 2]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([2, 2, 2]), PointN([2, 2, 2])),
-        ];
-        for (i, (desc, extent)) in octree
-            .children
-            .iter()
-            .zip(octree.extents.iter())
-            .enumerate()
-        {
+        for (i, desc) in octree.children.iter().enumerate() {
             assert_eq!(child_descriptors[i], *desc);
-            assert_eq!(extents[i], *extent);
         }
     }
 
@@ -736,21 +707,8 @@ mod tests {
             ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
             ChildDescriptor::new(Some(ChildMask(1)), Some(ChildMask(1)), Some(0)),
         ];
-        let extents = [
-            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([8, 8, 8])),
-            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([4, 4, 4])),
-            Extent3i::from_min_and_shape(PointN([4, 4, 4]), PointN([4, 4, 4])),
-            Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([2, 2, 2])),
-            Extent3i::from_min_and_shape(PointN([4, 4, 4]), PointN([2, 2, 2])),
-        ];
-        for (i, (desc, extent)) in octree
-            .children
-            .iter()
-            .zip(octree.extents.iter())
-            .enumerate()
-        {
+        for (i, desc) in octree.children.iter().enumerate() {
             assert_eq!(child_descriptors[i], *desc);
-            assert_eq!(extents[i], *extent);
         }
     }
 
