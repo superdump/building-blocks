@@ -85,7 +85,9 @@ impl ESVO {
         for i in 0..layers.children.len() {
             let mut offset = layers.children[i].len();
             for node in &mut layers.children[i] {
-                node.set_child_offset(node.child_offset() + offset as i16);
+                if node.has_non_leaf_children() {
+                    node.set_child_offset(node.child_offset() + offset as i16);
+                }
                 offset -= 1;
             }
             children.append(&mut layers.children[i]);
@@ -490,6 +492,7 @@ pub trait ChildDescriptor {
     fn has_leaf(&self, index: usize) -> bool;
     fn is_full(&self) -> bool;
     fn has_children(&self) -> bool;
+    fn has_non_leaf_children(&self) -> bool;
     fn has_child(&self, index: usize) -> bool;
     fn child_index(&self, index: usize) -> usize;
     fn add_child(&mut self, index: usize);
@@ -572,6 +575,15 @@ impl ChildDescriptor for u32 {
 
     fn has_children(&self) -> bool {
         self & (BIT_MASK_8 << CHILDREN_SHIFT_BITS) != 0
+    }
+
+    fn has_non_leaf_children(&self) -> bool {
+        for i in 0..8 {
+            if self.has_child(i) && !self.has_leaf(i) {
+                return true;
+            }
+        }
+        false
     }
 
     fn has_child(&self, index: usize) -> bool {
