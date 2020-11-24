@@ -498,6 +498,7 @@ pub trait ChildDescriptor {
     fn add_child(&mut self, index: usize);
     fn remove_child(&mut self, index: usize);
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+    fn print(&self) -> String;
 }
 
 fn child_descriptor(
@@ -614,6 +615,15 @@ impl ChildDescriptor for u32 {
             .field("children", &self.children())
             .field("leaves", &self.leaves())
             .finish()
+    }
+
+    fn print(&self) -> String {
+        format!(
+            "ChildDescriptor {{ leaves: {:?}, children: {:?}, child_offset: {} }}",
+            self.leaves(),
+            self.children(),
+            self.child_offset()
+        )
     }
 }
 
