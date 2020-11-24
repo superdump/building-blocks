@@ -5,8 +5,8 @@ use building_blocks_core::{
 use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local, Stride};
 
 pub struct ESVO {
-    extent: Extent3i,
-    children: Vec<u32>,
+    pub extent: Extent3i,
+    pub children: Vec<u32>,
 }
 
 impl Default for ESVO {
