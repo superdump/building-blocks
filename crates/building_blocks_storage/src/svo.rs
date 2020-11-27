@@ -1,17 +1,20 @@
-use crate::{octree::VisitStatus, Octant, OctreeVisitor};
+use crate::{
+    access::GetUncheckedRelease,
+    octree::{Octant, OctreeVisitor, VisitStatus},
+    Array, IsEmpty, Local, Stride,
+};
 use building_blocks_core::{
     ComponentwiseIntegerOps, Extent3i, IntegerPoint, Neighborhoods, Point3i, PointN,
 };
-use building_blocks_storage::{access::GetUncheckedRelease, Array, IsEmpty, Local, Stride};
 
-pub struct ESVO {
+pub struct SVO {
     pub extent: Extent3i,
     pub children: Vec<u32>,
 }
 
-impl Default for ESVO {
+impl Default for SVO {
     fn default() -> Self {
-        ESVO::new()
+        SVO::new()
     }
 }
 
@@ -35,7 +38,7 @@ impl Default for Layers {
     }
 }
 
-impl ESVO {
+impl SVO {
     pub fn new() -> Self {
         Self {
             extent: Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([0, 0, 0])),
@@ -385,7 +388,7 @@ impl ESVO {
     }
 }
 
-impl std::fmt::Debug for ESVO {
+impl std::fmt::Debug for SVO {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "")?;
         for (i, desc) in self.children.iter().enumerate() {
@@ -682,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_one_voxel() {
-        let mut octree = ESVO::new();
+        let mut octree = SVO::new();
         let p = PointN([1, -2, 3]);
         octree.insert(p);
         assert_eq!(
@@ -697,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_corners() {
-        let mut octree = ESVO::new();
+        let mut octree = SVO::new();
         let points: Vec<Point3i> = Point3i::corner_offsets()
             .iter_mut()
             .map(|p| p.scalar_left_shift(1))
@@ -727,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_insert_moves_subtrees() {
-        let mut octree = ESVO::new();
+        let mut octree = SVO::new();
         let points = [PointN([0, 0, 0]), PointN([4, 4, 4])];
         for p in &points {
             octree.insert(*p);
@@ -750,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_filled_collapse() {
-        let mut octree = ESVO::new();
+        let mut octree = SVO::new();
         for i in 0..4 * 4 * 4 {
             let p = crate::morton::decode_3d(i as u32);
             let p = PointN([p[0] as i32, p[1] as i32, p[2] as i32]);

@@ -8,22 +8,24 @@ use bevy::{
     prelude::*,
 };
 use building_blocks_core::{Extent3i, PointN};
-use building_blocks_partition::{
-    esvo::ESVO, morton::decode_3d, octree::VisitStatus, Octant, OctreeVisitor,
+use building_blocks_storage::{
+    morton::decode_3d,
+    octree::{Octant, OctreeVisitor, VisitStatus},
+    svo::SVO,
+    Array, Array3, Get, GetMut, IsEmpty,
 };
-use building_blocks_storage::{Array, Array3, Get, GetMut, IsEmpty};
 use noise::{MultiFractal, NoiseFn, RidgedMulti, Seedable};
 
-struct ESVOTree {
-    octree: ESVO,
+struct SVOTree {
+    octree: SVO,
     current_index: u32,
     array: Array3<Voxel>,
 }
 
-impl Default for ESVOTree {
+impl Default for SVOTree {
     fn default() -> Self {
         Self {
-            octree: ESVO::default(),
+            octree: SVO::default(),
             current_index: 0,
             array: Array3::fill(
                 Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([2, 2, 2])),
@@ -34,7 +36,7 @@ impl Default for ESVOTree {
 }
 
 #[derive(Debug, Default)]
-struct ESVOMeshes {
+struct SVOMeshes {
     material: Handle<StandardMaterial>,
     entities: HashMap<Octant, Entity>,
 }
@@ -42,8 +44,8 @@ struct ESVOMeshes {
 fn main() {
     App::build()
         .add_resource(ClearColor(Color::BLACK))
-        .init_resource::<ESVOTree>()
-        .init_resource::<ESVOMeshes>()
+        .init_resource::<SVOTree>()
+        .init_resource::<SVOMeshes>()
         .init_resource::<InputState>()
         .add_plugins(DefaultPlugins)
         .add_startup_system(setup_world.system())
@@ -78,9 +80,9 @@ fn setup_world(mut commands: Commands) {
         });
 }
 
-fn init_material(mut materials: ResMut<Assets<StandardMaterial>>, mut esvo: ResMut<ESVOMeshes>) {
-    let transparent = materials.add(Color::rgb(1.0, 1.0, 1.0).into());
-    esvo.material = transparent;
+fn init_material(mut materials: ResMut<Assets<StandardMaterial>>, mut svo: ResMut<SVOMeshes>) {
+    let transparent = materials.add(Color::rgba(1.0, 1.0, 1.0, 0.25).into());
+    svo.material = transparent;
 }
 
 #[derive(Clone)]
@@ -92,7 +94,7 @@ impl IsEmpty for Voxel {
     }
 }
 
-fn create_octree(mut esvo: ResMut<ESVOTree>) {
+fn create_octree(mut svo: ResMut<SVOTree>) {
     let n: usize = 32;
     let extent =
         Extent3i::from_min_and_shape(PointN([0, 0, 0]), PointN([n as i32, n as i32, n as i32]));
@@ -134,22 +136,22 @@ fn create_octree(mut esvo: ResMut<ESVOTree>) {
             }
         }
     }
-    esvo.octree = ESVO::from_array3(&array, extent);
-    esvo.array = array;
+    svo.octree = SVO::from_array3(&array, extent);
+    svo.array = array;
 }
 
 fn spawn_array_voxels(
     mut commands: Commands,
-    esvo: Res<ESVOTree>,
-    esvo_meshes: Res<ESVOMeshes>,
+    svo: Res<SVOTree>,
+    svo_meshes: Res<SVOMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let mesh = meshes.add(Mesh::from(shape::Cube { size: 0.5 }));
-    let array_extent = esvo.array.extent();
-    esvo.array.for_each_point_and_stride(array_extent, |p, s| {
-        if !esvo.array.get(s).is_empty() {
+    let array_extent = svo.array.extent();
+    svo.array.for_each_point_and_stride(array_extent, |p, s| {
+        if !svo.array.get(s).is_empty() {
             commands.spawn(PbrComponents {
-                material: esvo_meshes.material.clone(),
+                material: svo_meshes.material.clone(),
                 mesh: mesh.clone(),
                 transform: Transform::from_translation(Vec3::new(
                     p.x() as f32,
@@ -166,39 +168,39 @@ fn spawn_array_voxels(
     });
 }
 
-fn insert_voxel(input: Res<Input<KeyCode>>, mut esvo: ResMut<ESVOTree>) {
+fn insert_voxel(input: Res<Input<KeyCode>>, mut svo: ResMut<SVOTree>) {
     if input.just_pressed(KeyCode::N) {
-        let index = esvo.current_index;
+        let index = svo.current_index;
         let p = decode_3d(index);
-        esvo.octree
+        svo.octree
             .insert(PointN([p[0] as i32, p[1] as i32, p[2] as i32]));
-        esvo.current_index += 1;
+        svo.current_index += 1;
     }
 }
 
 fn update_meshes(
     mut commands: Commands,
-    esvo: ChangedRes<ESVOTree>,
-    mut esvo_meshes: ResMut<ESVOMeshes>,
+    svo: ChangedRes<SVOTree>,
+    mut svo_meshes: ResMut<SVOMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let (new_entities, removed_entities) = {
-        let mut visitor = ESVOMeshesVisitor {
-            entities: &esvo_meshes.entities,
-            removed_entities: esvo_meshes.entities.keys().cloned().collect(),
+        let mut visitor = SVOMeshesVisitor {
+            entities: &svo_meshes.entities,
+            removed_entities: svo_meshes.entities.keys().cloned().collect(),
             new_entities: HashSet::new(),
         };
-        esvo.octree.visit(&mut visitor);
+        svo.octree.visit(&mut visitor);
         (visitor.new_entities, visitor.removed_entities)
     };
-    let offset = Vec3::new((esvo.array.extent().shape.x() + 10) as f32, 0.0, 0.0);
+    let offset = Vec3::new((svo.array.extent().shape.x() + 10) as f32, 0.0, 0.0);
     for octant in &new_entities {
         let size = 0.5 * octant.edge_length as f32;
         let center = octant_center(&octant);
         let mesh = meshes.add(Mesh::from(shape::Cube { size }));
         let entity = commands
             .spawn(PbrComponents {
-                material: esvo_meshes.material.clone(),
+                material: svo_meshes.material.clone(),
                 mesh: mesh.clone(),
                 transform: Transform::from_translation(center - offset),
                 draw: Draw {
@@ -209,10 +211,10 @@ fn update_meshes(
             })
             .current_entity()
             .expect("Failed to spawn mesh");
-        esvo_meshes.entities.insert(*octant, entity);
+        svo_meshes.entities.insert(*octant, entity);
     }
     for octant in &removed_entities {
-        let entity = esvo_meshes
+        let entity = svo_meshes
             .entities
             .remove(octant)
             .expect("Failed to remove octant");
@@ -229,13 +231,13 @@ fn octant_center(octant: &Octant) -> Vec3 {
     )
 }
 
-pub struct ESVOMeshesVisitor<'a> {
+pub struct SVOMeshesVisitor<'a> {
     pub entities: &'a HashMap<Octant, Entity>,
     pub removed_entities: HashSet<Octant>,
     pub new_entities: HashSet<Octant>,
 }
 
-impl<'a> OctreeVisitor for ESVOMeshesVisitor<'a> {
+impl<'a> OctreeVisitor for SVOMeshesVisitor<'a> {
     fn visit_octant(&mut self, octant: Octant, is_leaf: bool) -> VisitStatus {
         if is_leaf {
             if self.entities.contains_key(&octant) {

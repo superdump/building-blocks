@@ -62,3 +62,7 @@ required-features = ["lz4", "snappy"]
 [[example]]
 name = "bevy_meshing"
 path = "examples/bevy_meshing/bevy_meshing.rs"
+
+[[example]]
+name = "svo"
+path = "examples/svo.rs"

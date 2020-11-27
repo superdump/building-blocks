@@ -13,7 +13,9 @@ pub mod access;
 pub mod array;
 pub mod chunk_map;
 pub mod func;
+pub mod morton;
 pub mod octree;
+pub mod svo;
 pub mod transform_map;
 
 pub use access::{copy_extent, ForEach, ForEachMut, Get, GetMut, ReadExtent, WriteExtent};
